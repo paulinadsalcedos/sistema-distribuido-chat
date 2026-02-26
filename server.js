@@ -1,107 +1,46 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const { exec } = require("child_process");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const cors = require("cors");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" }
-});
+const io = new Server(server);
 
-app.use(express.json());
-app.use(cors());
 app.use(express.static("public"));
 
-const SECRET = "super_secret_key";
+// Historial simple en RAM (después lo cambiamos a BD)
+const history = new Map(); // room -> array mensajes
+const MAX = 50;
 
-// Base de datos simulada en memoria
-let usuarios = [];
-
-
-// Registro
-app.post("/register", async (req, res) => {
-  const { username, password } = req.body;
-
-  const existe = usuarios.find(u => u.username === username);
-  if (existe) return res.status(400).json({ error: "Usuario ya existe" });
-
-  const hash = await bcrypt.hash(password, 10);
-
-  usuarios.push({ username, password: hash });
-
-  res.json({ message: "Usuario registrado" });
-});
-
-// Login
-app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
-
-  const user = usuarios.find(u => u.username === username);
-  if (!user) return res.status(400).json({ error: "Usuario no encontrado" });
-
-  const valido = await bcrypt.compare(password, user.password);
-  if (!valido) return res.status(401).json({ error: "Contraseña incorrecta" });
-
-  const token = jwt.sign({ username }, SECRET, { expiresIn: "2h" });
-
-  res.json({ token });
-});
-
-
-io.use((socket, next) => {
-  const token = socket.handshake.auth.token;
-  if (!token) return next(new Error("No autorizado"));
-
-  try {
-    const decoded = jwt.verify(token, SECRET);
-    socket.username = decoded.username;
-    next();
-  } catch (err) {
-    next(new Error("Token inválido"));
-  }
-});
+function pushHistory(room, msg){
+  if(!history.has(room)) history.set(room, []);
+  const arr = history.get(room);
+  arr.push(msg);
+  if(arr.length > MAX) arr.shift();
+}
 
 io.on("connection", (socket) => {
-  console.log("Usuario conectado:", socket.username);
+  console.log("Usuario conectado:", socket.id);
 
-  // Unirse a sala
-  socket.on("joinRoom", (room) => {
+  socket.on("joinRoom", ({ room, user }) => {
     socket.join(room);
+    const items = history.get(room) || [];
+    socket.emit("historial", items);
+    console.log(`${user || "Invitado"} entró a ${room}`);
   });
 
-  // Enviar mensaje
-  socket.on("mensaje", ({ room, mensaje }) => {
-    io.to(room).emit("mensaje", {
-      usuario: socket.username,
-      mensaje
-    });
-  });
-
-  // Gestión de procesos
-  socket.on("obtenerProcesos", () => {
-    const comando = process.platform === "win32" ? "tasklist" : "ps aux";
-
-    exec(comando, (error, stdout) => {
-      if (error) {
-        socket.emit("procesos", "Error al obtener procesos");
-        return;
-      }
-      socket.emit("procesos", stdout);
-    });
+  socket.on("mensaje", (msg) => {
+    // msg: { room, user, text, ts }
+    if(!msg?.room || !msg?.text) return;
+    pushHistory(msg.room, msg);
+    io.to(msg.room).emit("mensaje", msg);
   });
 
   socket.on("disconnect", () => {
-    console.log("Usuario desconectado:", socket.username);
+    console.log("Usuario desconectado:", socket.id);
   });
 });
 
-
-const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, () => {
-  console.log("Servidor corriendo en puerto", PORT);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Servidor corriendo en puerto ${PORT}`);
 });
